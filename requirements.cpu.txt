@@ -2,3 +2,4 @@ websockets
 sherpa_onnx
 numpy
 soundfile
+sentry-sdk

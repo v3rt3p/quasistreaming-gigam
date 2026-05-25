@@ -1,0 +1,25 @@
+services:
+  quasistreaming-gigam:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    restart: unless-stopped
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids: ["0"]
+            capabilities: [gpu]
+    environment:
+      RECOGNIZER_MODEL_PATH: /models/gigaam_v3_e2e_ctc.onnx
+      RECOGNIZER_TOKENS_PATH: /models/gigaam_v3_e2e_ctc_tokens.txt
+      VAD_MODEL_PATH: /models/silero_vad.onnx
+      VAD_MIN_SILENCE_DURATION: 1.25
+      VAD_THRESHOLD: 0.48
+      INPUT_GAIN: 100
+    volumes:
+      - /srv/models/gigaam-v3-e2e-ctc-onnx:/models/
+    ports:
+      - 127.0.0.1:8080:8080

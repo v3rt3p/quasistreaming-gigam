@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Model files
+*.onnx
+*.pt
+*.bin
+tokens.txt
+
+# Logs
+*.wav
+logs/

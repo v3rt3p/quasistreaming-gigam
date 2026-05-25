@@ -1,0 +1,15 @@
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Model files (mount via volumes instead)
+*.onnx
+*.pt
+*.bin
+tokens.txt
+
+# Logs / recorded audio
+*.wav
+logs/
