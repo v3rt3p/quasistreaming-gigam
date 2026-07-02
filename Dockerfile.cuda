@@ -1,7 +1,7 @@
 FROM nvcr.io/nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive RECOGNIZER_ONNX_PROVIDER=cuda
 WORKDIR /app
-RUN apt update && apt install -y python3 python3-pip libasound2t64 && apt clean
+RUN apt update && apt install -y python3 python3-pip libasound2t64 libc++1 && apt clean
 
 COPY requirements.cuda.txt requirements.cuda.txt
 RUN \

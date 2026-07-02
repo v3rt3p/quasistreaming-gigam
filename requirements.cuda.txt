@@ -2,3 +2,4 @@ websockets
 numpy
 soundfile
 sentry-sdk
+ten-vad>=1.0.6.8
