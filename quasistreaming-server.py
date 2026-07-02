@@ -1,33 +1,34 @@
 import asyncio
+import array
+import json
 import logging
 import os
 import signal
 import sys
-import websockets
-import json
-import sherpa_onnx
-import numpy as np
-import array
-import soundfile as sf
 import uuid
+
+import numpy as np
 import sentry_sdk
+import sherpa_onnx
+import soundfile as sf
+import websockets
+
+from asr_core.streaming_asr import StreamingAsrConfig, StreamingAsrSession
 
 HOST = "0.0.0.0"
-PORT = int(os.environ.get("PORT", 8080))
-
-RECOGNIZER_ONNX_PROVIDER = os.environ.get("RECOGNIZER_ONNX_PROVIDER", "cpu")
-VAD_ONNX_PROVIDER = os.environ.get("VAD_ONNX_PROVIDER", "cpu")
+PORT = int(os.environ.get("PORT", "8080"))
 
 INPUT_GAIN = float(os.environ.get("INPUT_GAIN", "1"))
 
+RECOGNIZER_ONNX_PROVIDER = os.environ.get("RECOGNIZER_ONNX_PROVIDER", "cpu")
 RECOGNIZER_MODEL_PATH = os.environ.get("RECOGNIZER_MODEL_PATH", "v2_ctc.onnx")
 RECOGNIZER_TOKENS_PATH = os.environ.get("RECOGNIZER_TOKENS_PATH", "tokens.txt")
 
-VAD_MODEL_PATH = os.environ.get("VAD_MODEL_PATH", "silero_vad.onnx")
 VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.3"))
-VAD_MIN_SILENCE_DURATION = float(os.environ.get("VAD_MIN_SILENCE_DURATION", "1"))
-VAD_MIN_SPEECH_DURATION = float(os.environ.get("VAD_MIN_SPEECH_DURATION", "0.25"))
+VAD_MIN_SILENCE_DURATION = float(os.environ.get("VAD_MIN_SILENCE_DURATION", "0.8"))
+VAD_MIN_SPEECH_DURATION = float(os.environ.get("VAD_MIN_SPEECH_DURATION", "1.5"))
 VAD_MAX_SPEECH_DURATION = float(os.environ.get("VAD_MAX_SPEECH_DURATION", "8"))
+ASR_STREAMING_MODE = os.environ.get("ASR_STREAMING_MODE", "quasistreaming")
 
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "https://example@o0.ingest.sentry.io/0")
 
@@ -60,22 +61,6 @@ def create_recognizer() -> sherpa_onnx.OfflineRecognizer:
     )
 
 
-def create_vad() -> sherpa_onnx.VoiceActivityDetector:
-    logging.info(f"creating vad for provider '{VAD_ONNX_PROVIDER}'")
-    config = sherpa_onnx.VadModelConfig(provider=VAD_ONNX_PROVIDER)
-    config.silero_vad.model = VAD_MODEL_PATH
-    config.silero_vad.threshold = VAD_THRESHOLD
-    config.silero_vad.min_silence_duration = VAD_MIN_SILENCE_DURATION
-    config.silero_vad.min_speech_duration = VAD_MIN_SPEECH_DURATION
-    config.silero_vad.max_speech_duration = VAD_MAX_SPEECH_DURATION
-    config.sample_rate = base_sample_rate
-
-    window_size = config.silero_vad.window_size
-
-    vad = sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=100)
-    return (vad, window_size)
-
-
 def save_buffer(samples) -> None:
     if LOG_PATH is None:
         return
@@ -84,10 +69,55 @@ def save_buffer(samples) -> None:
     logging.info(f"saved samples to {path}")
 
 
+def create_streaming_config(sample_rate: int) -> StreamingAsrConfig:
+    return StreamingAsrConfig(
+        sample_rate=sample_rate,
+        language=os.environ.get("ASR_LANGUAGE", "ru"),
+        vad_threshold=VAD_THRESHOLD,
+        eou_silence_ms=int(VAD_MIN_SILENCE_DURATION * 1000),
+        min_utterance_ms=int(VAD_MIN_SPEECH_DURATION * 1000),
+        max_utterance_ms=int(VAD_MAX_SPEECH_DURATION * 1000),
+        speech_pad_ms=int(os.environ.get("ASR_STREAM_SPEECH_PAD_MS", "200")),
+        partial_results=os.environ.get("ASR_STREAM_PARTIAL_RESULTS", "true").lower()
+        not in {"0", "false", "no", "off"},
+        partial_interval_ms=int(os.environ.get("ASR_STREAM_PARTIAL_INTERVAL_MS", "1000")),
+        min_partial_audio_ms=int(os.environ.get("ASR_STREAM_MIN_PARTIAL_AUDIO_MS", "1800")),
+        emit_vad_events=os.environ.get("ASR_STREAM_EMIT_VAD_EVENTS", "false").lower()
+        in {"1", "true", "yes", "on"},
+        streaming_mode=ASR_STREAMING_MODE,
+        quasistreaming_stable_repeats=int(
+            os.environ.get("ASR_QUASISTREAMING_STABLE_REPEATS", "3")
+        ),
+    )
+
+
+async def recognize_audio(
+    audio_pcm16: np.ndarray,
+    offset_s: float,
+    _language: str,
+) -> list[tuple[float, float, str]]:
+    if recognizer is None:
+        raise RuntimeError("Recognizer is not initialized")
+
+    samples = (audio_pcm16.astype(np.float32) / 32768.0) * INPUT_GAIN
+    if samples.size == 0:
+        return []
+
+    with sentry_sdk.start_span(op="recognize", name="GigaAM recognizing") as span:
+        stream = recognizer.create_stream()
+        stream.accept_waveform(base_sample_rate, samples)
+        recognizer.decode_stream(stream)
+        text = stream.result.text.strip()
+        span.set_data("text", text)
+
+    if not text:
+        return []
+    duration_s = len(audio_pcm16) / float(base_sample_rate)
+    return [(offset_s, offset_s + duration_s, text)]
+
+
 async def transcribe(websocket: websockets.ServerConnection) -> None:
     with sentry_sdk.start_transaction(sentry_sdk.continue_trace(websocket.request.headers, op="stt", name="STT session")):
-        global recognizer
-
         config_message = json.loads(await websocket.recv())
         sample_rate = config_message['sample_rate']
         if sample_rate != base_sample_rate:
@@ -95,94 +125,56 @@ async def transcribe(websocket: websockets.ServerConnection) -> None:
             await websocket.close()
             return
 
-        with sentry_sdk.start_span(op="create-vad", name="VAD creation"):
-            vad, window_size = create_vad()
-
-        buffer = []
-        started = False
-        started_time = None
-        offset = 0
-
-        logging.info("vad created")
-
-        current_time = 0
-
-        overall_buffer = []
-
-        texts = []
+        session = StreamingAsrSession(
+            config=create_streaming_config(sample_rate),
+            transcribe=recognize_audio,
+        )
+        overall_buffer: list[np.ndarray] = []
 
         async for message in websocket:
             if type(message) is str:
                 continue
 
-            samples = np.array(array.array('h', message)) / 32767.0 * INPUT_GAIN
-
-            buffer = np.concatenate([buffer, samples])
-            overall_buffer = np.concatenate([overall_buffer, samples])
-
-            while offset + window_size < len(buffer):
-                vad.accept_waveform(buffer[offset : offset + window_size])
-                if not started and vad.is_speech_detected():
-                    logging.info("speech started")
-                    started = True
-                    started_time = current_time
-                offset += window_size
-
-            if not started:
-                if len(buffer) > 10 * window_size:
-                    offset -= len(buffer) - 10 * window_size
-                    buffer = buffer[-10 * window_size :]
-
-            if started and current_time - started_time > 1:
-                with sentry_sdk.start_span(op="recognize", name="GigaAM recognizing") as span:
-                    stream = recognizer.create_stream()
-                    stream.accept_waveform(sample_rate, buffer)
-                    recognizer.decode_stream(stream)
-                    text = stream.result.text.strip()
-                    span.set_data("text", text)
-
-                if text:
-                    texts.append(text)
-                    logging.info(f"recognized text: '{text}'")
-
-                    end_of_utt = len(texts) > 3 and texts[-1] == texts[-2] and texts[-2] == texts[-3]
-
-                    await websocket.send(json.dumps({
-                        "end_of_utt": end_of_utt,
-                        "text": text
-                    }))
-                    if end_of_utt:
-                        break
-
-                started_time = current_time
-
-            while not vad.empty():
-                with sentry_sdk.start_span(op="recognize", name="GigaAM recognizing") as span:
-                    stream = recognizer.create_stream()
-                    stream.accept_waveform(sample_rate, vad.front.samples)
-                    recognizer.decode_stream(stream)
-                    vad.pop()
-                    text = stream.result.text.strip()
-                    span.set_data("text", text)
-
-                logging.info(f"final recognized text: '{text}'")
-                save_buffer(overall_buffer)
-                await websocket.send(json.dumps({
-                    "end_of_utt": True,
-                    "text": text
-                }))
-
-                buffer = []
-                offset = 0
-                started = False
-                started_time = None
-
+            samples = np.array(array.array("h", message), dtype=np.int16)
+            overall_buffer.append(samples.copy())
+            events = await session.add_audio(samples)
+            should_close = await send_transcript_events(websocket, events)
+            if should_close:
+                save_buffer(np.concatenate(overall_buffer))
                 await websocket.close()
                 return
 
-            current_time += len(samples) / base_sample_rate
+        events = await session.finish()
+        await send_transcript_events(websocket, events)
+        if overall_buffer:
+            save_buffer(np.concatenate(overall_buffer))
 
-        save_buffer(overall_buffer)
+
+async def send_transcript_events(
+    websocket: websockets.ServerConnection,
+    events: list[dict],
+) -> bool:
+    for event in events:
+        if event.get("type") != "transcript":
+            continue
+        text = str(event.get("text") or "").strip()
+        if not text:
+            continue
+        is_final = bool(event.get("is_final") or event.get("final") or event.get("eou"))
+        logging.info("%s recognized text: '%s'", "final" if is_final else "partial", text)
+        await websocket.send(
+            json.dumps(
+                {
+                    "end_of_utt": is_final,
+                    "text": text,
+                    "result_type": event.get("result_type"),
+                    "reason": event.get("reason"),
+                }
+            )
+        )
+        if is_final:
+            return True
+    return False
 
 async def _windows_cancel(stop_event: asyncio.Event) -> None:
     try:
