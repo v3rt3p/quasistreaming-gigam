@@ -9,17 +9,20 @@ services:
       resources:
         reservations:
           devices:
-          - driver: nvidia
-            device_ids: ["0"]
-            capabilities: [gpu]
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
     environment:
-      RECOGNIZER_MODEL_PATH: /models/gigaam_v3_e2e_ctc.onnx
-      RECOGNIZER_TOKENS_PATH: /models/gigaam_v3_e2e_ctc_tokens.txt
-      VAD_MODEL_PATH: /models/silero_vad.onnx
+      GIGAAM_MODEL_NAME: multilingual_large_ctc
+      GIGAAM_DEVICE: cuda
+      GIGAAM_DOWNLOAD_ROOT: /app/.cache/gigaam
       VAD_MIN_SILENCE_DURATION: 1.25
       VAD_THRESHOLD: 0.48
-      INPUT_GAIN: 100
+      INPUT_GAIN: 1
     volumes:
-      - /srv/models/gigaam-v3-e2e-ctc-onnx:/models/
+      - gigaam-multilingual-large-ctc:/app/.cache/gigaam
     ports:
       - 127.0.0.1:8080:8080
+
+volumes:
+  gigaam-multilingual-large-ctc:

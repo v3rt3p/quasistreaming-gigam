@@ -1,8 +1,20 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
+
+ENV GIGAAM_DEVICE=cpu \
+    GIGAAM_DOWNLOAD_ROOT=/app/.cache/gigaam \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
-ENV RECOGNIZER_ONNX_PROVIDER=cpu
-RUN apt-get update && apt-get install -y --no-install-recommends libc++1 && rm -rf /var/lib/apt/lists/*
-COPY requirements.cpu.txt requirements.cpu.txt
-RUN pip install -r requirements.cpu.txt
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg git libsndfile1 libc++1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.cpu.txt requirements.common.txt ./
+RUN pip install --no-cache-dir -r requirements.cpu.txt \
+    && pip install --no-cache-dir -r requirements.common.txt
+
 COPY . .
+RUN mkdir -p /app/.cache/gigaam
+
 CMD ["python", "quasistreaming-server.py"]

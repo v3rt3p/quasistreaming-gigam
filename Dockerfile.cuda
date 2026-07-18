@@ -1,11 +1,20 @@
-FROM nvcr.io/nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04
-ENV DEBIAN_FRONTEND=noninteractive RECOGNIZER_ONNX_PROVIDER=cuda
-WORKDIR /app
-RUN apt update && apt install -y python3 python3-pip libasound2t64 libc++1 && apt clean
+FROM python:3.11-slim
 
-COPY requirements.cuda.txt requirements.cuda.txt
-RUN \
-        pip3 install --break-system-packages sherpa-onnx=="1.12.40+cuda12.cudnn9" --no-index -f https://k2-fsa.github.io/sherpa/onnx/cuda.html && \
-        pip3 install --break-system-packages -r requirements.cuda.txt
+ENV GIGAAM_DEVICE=auto \
+    GIGAAM_DOWNLOAD_ROOT=/app/.cache/gigaam \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg git libsndfile1 libc++1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.cuda.txt requirements.common.txt ./
+RUN pip install --no-cache-dir -r requirements.cuda.txt \
+    && pip install --no-cache-dir -r requirements.common.txt
+
 COPY . .
-CMD ["python3", "quasistreaming-server.py"]
+RUN mkdir -p /app/.cache/gigaam
+
+CMD ["python", "quasistreaming-server.py"]

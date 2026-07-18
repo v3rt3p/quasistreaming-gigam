@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import array
 import json
@@ -9,21 +11,16 @@ import uuid
 
 import numpy as np
 import sentry_sdk
-import sherpa_onnx
 import soundfile as sf
 import websockets
 
 from asr_core.streaming_asr import StreamingAsrConfig, StreamingAsrSession
+from gigaam_backend import GigaAMBackend
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8080"))
 
 INPUT_GAIN = float(os.environ.get("INPUT_GAIN", "1"))
-
-RECOGNIZER_ONNX_PROVIDER = os.environ.get("RECOGNIZER_ONNX_PROVIDER", "cpu")
-RECOGNIZER_MODEL_PATH = os.environ.get("RECOGNIZER_MODEL_PATH", "v2_ctc.onnx")
-RECOGNIZER_TOKENS_PATH = os.environ.get("RECOGNIZER_TOKENS_PATH", "tokens.txt")
-
 VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.3"))
 VAD_MIN_SILENCE_DURATION = float(os.environ.get("VAD_MIN_SILENCE_DURATION", "0.8"))
 VAD_MIN_SPEECH_DURATION = float(os.environ.get("VAD_MIN_SPEECH_DURATION", "1.5"))
@@ -35,7 +32,7 @@ SENTRY_DSN = os.environ.get("SENTRY_DSN", "https://example@o0.ingest.sentry.io/0
 sentry_sdk.init(
     dsn=SENTRY_DSN,
     traces_sample_rate=1,
-    default_integrations=False
+    default_integrations=False,
 )
 
 LOG_PATH = os.environ.get("LOG_PATH")
@@ -48,25 +45,15 @@ logging.basicConfig(
 
 base_sample_rate = 16000
 
-recognizer = None
+recognizer: GigaAMBackend | None = None
 
 
-def create_recognizer() -> sherpa_onnx.OfflineRecognizer:
-    logging.info(f"creating recognizer for provider '{RECOGNIZER_ONNX_PROVIDER}'")
-    return sherpa_onnx.OfflineRecognizer.from_nemo_ctc(
-        model=RECOGNIZER_MODEL_PATH,
-        tokens=RECOGNIZER_TOKENS_PATH,
-        debug=False,
-        provider=RECOGNIZER_ONNX_PROVIDER
-    )
-
-
-def save_buffer(samples) -> None:
+def save_buffer(samples: np.ndarray) -> None:
     if LOG_PATH is None:
         return
     path = f"{uuid.uuid4()}.wav"
     sf.write(os.path.join(LOG_PATH, path), samples, base_sample_rate)
-    logging.info(f"saved samples to {path}")
+    logging.info("saved samples to %s", path)
 
 
 def create_streaming_config(sample_rate: int) -> StreamingAsrConfig:
@@ -97,19 +84,20 @@ async def recognize_audio(
     _language: str,
 ) -> list[tuple[float, float, str]]:
     if recognizer is None:
-        raise RuntimeError("Recognizer is not initialized")
+        raise RuntimeError("GigaAM recognizer is not initialized")
 
     samples = (audio_pcm16.astype(np.float32) / 32768.0) * INPUT_GAIN
     if samples.size == 0:
         return []
 
     with sentry_sdk.start_span(op="recognize", name="GigaAM recognizing") as span:
-        stream = recognizer.create_stream()
-        stream.accept_waveform(base_sample_rate, samples)
-        recognizer.decode_stream(stream)
-        text = stream.result.text.strip()
+        text = await recognizer.transcribe(samples, base_sample_rate)
         span.set_data("text", text)
+        span.set_data("gigaam_model", recognizer.model_name)
+        span.set_data("gigaam_device", recognizer.device)
+        span.set_data("audio_duration_s", len(samples) / base_sample_rate)
 
+    text = text.strip()
     if not text:
         return []
     duration_s = len(audio_pcm16) / float(base_sample_rate)
@@ -117,11 +105,21 @@ async def recognize_audio(
 
 
 async def transcribe(websocket: websockets.ServerConnection) -> None:
-    with sentry_sdk.start_transaction(sentry_sdk.continue_trace(websocket.request.headers, op="stt", name="STT session")):
+    request = getattr(websocket, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        headers = getattr(websocket, "request_headers", {})
+    transaction = sentry_sdk.continue_trace(headers, op="stt", name="STT session")
+
+    with sentry_sdk.start_transaction(transaction):
         config_message = json.loads(await websocket.recv())
-        sample_rate = config_message['sample_rate']
+        sample_rate = config_message["sample_rate"]
         if sample_rate != base_sample_rate:
-            logging.warning(f"sample rate mismatch, expected {base_sample_rate}, got {sample_rate}")
+            logging.warning(
+                "sample rate mismatch, expected %d, got %d",
+                base_sample_rate,
+                sample_rate,
+            )
             await websocket.close()
             return
 
@@ -132,7 +130,7 @@ async def transcribe(websocket: websockets.ServerConnection) -> None:
         overall_buffer: list[np.ndarray] = []
 
         async for message in websocket:
-            if type(message) is str:
+            if isinstance(message, str):
                 continue
 
             samples = np.array(array.array("h", message), dtype=np.int16)
@@ -161,7 +159,11 @@ async def send_transcript_events(
         if not text:
             continue
         is_final = bool(event.get("is_final") or event.get("final") or event.get("eou"))
-        logging.info("%s recognized text: '%s'", "final" if is_final else "partial", text)
+        logging.info(
+            "%s recognized text: '%s'",
+            "final" if is_final else "partial",
+            text,
+        )
         await websocket.send(
             json.dumps(
                 {
@@ -176,6 +178,7 @@ async def send_transcript_events(
             return True
     return False
 
+
 async def _windows_cancel(stop_event: asyncio.Event) -> None:
     try:
         while True:
@@ -186,7 +189,8 @@ async def _windows_cancel(stop_event: asyncio.Event) -> None:
 
 async def main() -> None:
     global recognizer
-    recognizer = create_recognizer()
+    recognizer = GigaAMBackend()
+    await recognizer.load_async()
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -200,6 +204,7 @@ async def main() -> None:
     async with websockets.serve(transcribe, HOST, PORT):
         logging.info("started on :%d", PORT)
         await stop.wait()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
