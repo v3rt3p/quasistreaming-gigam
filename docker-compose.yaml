@@ -13,7 +13,7 @@ services:
               device_ids: ["0"]
               capabilities: [gpu]
     environment:
-      GIGAAM_MODEL_NAME: multilingual_large_ctc
+      GIGAAM_MODEL_NAME: v3_e2e_rnnt
       GIGAAM_DEVICE: cuda
       GIGAAM_DOWNLOAD_ROOT: /app/.cache/gigaam
       VAD_MIN_SILENCE_DURATION: 1.25
@@ -21,9 +21,9 @@ services:
       INPUT_GAIN: 1
       ASR_STREAMING_MODE: streaming
     volumes:
-      - gigaam-multilingual-large-ctc:/app/.cache/gigaam
+      - gigaam-v3-e2e-rnnt:/app/.cache/gigaam
     ports:
       - 127.0.0.1:8080:8080
 
 volumes:
-  gigaam-multilingual-large-ctc:
+  gigaam-v3-e2e-rnnt:

@@ -1,6 +1,6 @@
 # quasistreaming-gigam
 
-Streaming WebSocket ASR using GigaAM `multilingual_large_ctc` and TEN VAD.
+Streaming WebSocket ASR using GigaAM `v3_e2e_rnnt` and TEN VAD.
 The connection stays open across utterances; `end_of_utt` marks an utterance
 boundary. The public protocol remains mono 16 kHz PCM16 input with JSON
 responses containing `text` and `end_of_utt`.
@@ -14,7 +14,7 @@ On Linux, TEN VAD requires `libc++1`; the bundled Dockerfiles install it.
 
 ## Models
 
-GigaAM downloads `multilingual_large_ctc` on first startup. Set
+GigaAM downloads `v3_e2e_rnnt` on first startup. Set
 `GIGAAM_DOWNLOAD_ROOT` to a persistent directory so container restarts reuse
 the checkpoint. The first load requires outbound network access and enough disk
 space for the model.
@@ -43,8 +43,8 @@ docker compose up
 ```
 
 Compose reserves GPU 0 and persists the GigaAM checkpoint in the
-`gigaam-multilingual-large-ctc` volume. Startup logs must report
-`model=multilingual_large_ctc device=cuda`. A CPU fallback means the host
+`gigaam-v3-e2e-rnnt` volume. Startup logs must report
+`model=v3_e2e_rnnt device=cuda`. A CPU fallback means the host
 driver, GPU passthrough, PyTorch wheel, or GPU architecture needs attention.
 
 To prewarm the model cache before rollout, start a container from the same image
@@ -54,7 +54,7 @@ downloads and verifies its own checkpoint.
 
 ## Configuration
 
-- `GIGAAM_MODEL_NAME`: checkpoint name, default `multilingual_large_ctc`.
+- `GIGAAM_MODEL_NAME`: checkpoint name, default `v3_e2e_rnnt`.
 - `GIGAAM_DEVICE`: `auto`, `cpu`, or `cuda`; unavailable or incompatible CUDA
   falls back to CPU, including one CPU retry after CUDA model-load failure.
 - `GIGAAM_DOWNLOAD_ROOT`: model cache, default `/app/.cache/gigaam`.

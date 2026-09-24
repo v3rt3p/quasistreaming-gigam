@@ -28,7 +28,7 @@ class GigaAMBackend:
         max_window_seconds: float | None = None,
     ) -> None:
         self.model_name = model_name or os.getenv(
-            "GIGAAM_MODEL_NAME", "multilingual_large_ctc"
+            "GIGAAM_MODEL_NAME", "v3_e2e_rnnt"
         )
         self.requested_device = requested_device or os.getenv("GIGAAM_DEVICE", "auto")
         self.download_root = Path(
