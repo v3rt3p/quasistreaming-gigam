@@ -26,13 +26,12 @@ async def run(wav_path: str, url: str) -> None:
             chunk = data[i : i + CHUNK_SAMPLES]
             await ws.send(array.array("h", chunk).tobytes())
 
-        # Read transcription results until the connection closes
+        # Keep the socket open across utterance boundaries. The server uses
+        # end_of_utt to delimit results and closes only when the peer is done.
         try:
             async for message in ws:
                 result = json.loads(message)
                 print(result.get("text", ""), flush=True)
-                if result.get("end_of_utt"):
-                    break
         except websockets.exceptions.ConnectionClosedOK:
             pass
 

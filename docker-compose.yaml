@@ -19,6 +19,7 @@ services:
       VAD_MIN_SILENCE_DURATION: 1.25
       VAD_THRESHOLD: 0.48
       INPUT_GAIN: 1
+      ASR_STREAMING_MODE: streaming
     volumes:
       - gigaam-multilingual-large-ctc:/app/.cache/gigaam
     ports:

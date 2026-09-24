@@ -13,6 +13,7 @@ import numpy as np
 import sentry_sdk
 import soundfile as sf
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from asr_core.streaming_asr import StreamingAsrConfig, StreamingAsrSession
 from gigaam_backend import GigaAMBackend
@@ -25,7 +26,7 @@ VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.3"))
 VAD_MIN_SILENCE_DURATION = float(os.environ.get("VAD_MIN_SILENCE_DURATION", "0.8"))
 VAD_MIN_SPEECH_DURATION = float(os.environ.get("VAD_MIN_SPEECH_DURATION", "1.5"))
 VAD_MAX_SPEECH_DURATION = float(os.environ.get("VAD_MAX_SPEECH_DURATION", "8"))
-ASR_STREAMING_MODE = os.environ.get("ASR_STREAMING_MODE", "quasistreaming")
+ASR_STREAMING_MODE = os.environ.get("ASR_STREAMING_MODE", "streaming")
 
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "https://example@o0.ingest.sentry.io/0")
 
@@ -110,48 +111,77 @@ async def transcribe(websocket: websockets.ServerConnection) -> None:
     if headers is None:
         headers = getattr(websocket, "request_headers", {})
     transaction = sentry_sdk.continue_trace(headers, op="stt", name="STT session")
+    overall_buffer: list[np.ndarray] = []
 
     with sentry_sdk.start_transaction(transaction):
-        config_message = json.loads(await websocket.recv())
-        sample_rate = config_message["sample_rate"]
-        if sample_rate != base_sample_rate:
-            logging.warning(
-                "sample rate mismatch, expected %d, got %d",
-                base_sample_rate,
-                sample_rate,
-            )
-            await websocket.close()
-            return
-
-        session = StreamingAsrSession(
-            config=create_streaming_config(sample_rate),
-            transcribe=recognize_audio,
-        )
-        overall_buffer: list[np.ndarray] = []
-
-        async for message in websocket:
-            if isinstance(message, str):
-                continue
-
-            samples = np.array(array.array("h", message), dtype=np.int16)
-            overall_buffer.append(samples.copy())
-            events = await session.add_audio(samples)
-            should_close = await send_transcript_events(websocket, events)
-            if should_close:
-                save_buffer(np.concatenate(overall_buffer))
-                await websocket.close()
+        try:
+            config_message = json.loads(await websocket.recv())
+            sample_rate = config_message["sample_rate"]
+            if sample_rate != base_sample_rate:
+                logging.warning(
+                    "sample rate mismatch, expected %d, got %d",
+                    base_sample_rate,
+                    sample_rate,
+                )
+                await close_socket(websocket)
                 return
 
-        events = await session.finish()
-        await send_transcript_events(websocket, events)
-        if overall_buffer:
-            save_buffer(np.concatenate(overall_buffer))
+            session = StreamingAsrSession(
+                config=create_streaming_config(sample_rate),
+                transcribe=recognize_audio,
+            )
+
+            async for message in websocket:
+                if isinstance(message, str):
+                    continue
+
+                samples = np.array(array.array("h", message), dtype=np.int16)
+                overall_buffer.append(samples.copy())
+                events = await session.add_audio(samples)
+                if not await send_transcript_events(websocket, events):
+                    continue
+
+                # An end-of-utterance is a boundary, not a connection boundary.
+                # Streaming clients can send the next utterance on this socket.
+                session = StreamingAsrSession(
+                    config=create_streaming_config(sample_rate),
+                    transcribe=recognize_audio,
+                )
+
+            # Async iteration ends when the peer closes. Never run a final
+            # decode/send here: the peer cannot receive it anymore.
+        except ConnectionClosed:
+            logging.info("STT peer closed the WebSocket")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            logging.warning("invalid STT session: %s", error)
+        finally:
+            if overall_buffer:
+                save_buffer(np.concatenate(overall_buffer))
+
+
+def websocket_is_open(websocket: websockets.ServerConnection) -> bool:
+    state = getattr(websocket, "state", None)
+    if state is not None:
+        return state.name == "OPEN" if hasattr(state, "name") else state == 1
+    return not bool(getattr(websocket, "closed", False))
+
+
+async def close_socket(websocket: websockets.ServerConnection) -> None:
+    if not websocket_is_open(websocket):
+        return
+    try:
+        await websocket.close()
+    except ConnectionClosed:
+        pass
 
 
 async def send_transcript_events(
     websocket: websockets.ServerConnection,
     events: list[dict],
 ) -> bool:
+    if not websocket_is_open(websocket):
+        return False
+
     for event in events:
         if event.get("type") != "transcript":
             continue
@@ -164,16 +194,19 @@ async def send_transcript_events(
             "final" if is_final else "partial",
             text,
         )
-        await websocket.send(
-            json.dumps(
-                {
-                    "end_of_utt": is_final,
-                    "text": text,
-                    "result_type": event.get("result_type"),
-                    "reason": event.get("reason"),
-                }
+        try:
+            await websocket.send(
+                json.dumps(
+                    {
+                        "end_of_utt": is_final,
+                        "text": text,
+                        "result_type": event.get("result_type"),
+                        "reason": event.get("reason"),
+                    }
+                )
             )
-        )
+        except ConnectionClosed:
+            return False
         if is_final:
             return True
     return False

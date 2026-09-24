@@ -1,8 +1,13 @@
 # quasistreaming-gigam
 
-Quasi-streaming WebSocket ASR using GigaAM `multilingual_large_ctc` and TEN
-VAD. The public protocol remains mono 16 kHz PCM16 input with JSON responses
-containing `text` and `end_of_utt`.
+Streaming WebSocket ASR using GigaAM `multilingual_large_ctc` and TEN VAD.
+The connection stays open across utterances; `end_of_utt` marks an utterance
+boundary. The public protocol remains mono 16 kHz PCM16 input with JSON
+responses containing `text` and `end_of_utt`.
+
+The transport and endpointing are streaming, but this pinned GigaAM API only
+provides file-based `transcribe()`. Each partial therefore re-decodes a bounded
+short window in a worker thread rather than using a stateful decoder.
 
 The streaming ASR endpointing code and TEN VAD are ported from Alina_Service.
 On Linux, TEN VAD requires `libc++1`; the bundled Dockerfiles install it.
@@ -58,7 +63,9 @@ downloads and verifies its own checkpoint.
 - `VAD_THRESHOLD`, `VAD_MIN_SILENCE_DURATION`,
   `VAD_MIN_SPEECH_DURATION`, `VAD_MAX_SPEECH_DURATION`: endpointing controls.
 - `INPUT_GAIN`: input multiplier.
-- `ASR_STREAMING_MODE=quasistreaming|streaming`: streaming output mode.
+- `ASR_STREAMING_MODE=quasistreaming|streaming`: partial output mode; the
+  Docker Compose deployment uses `streaming` so final results only follow VAD
+  endpointing, while both modes use bounded re-decoding with this GigaAM API.
 - `ASR_QUASISTREAMING_STABLE_REPEATS`: matching partial results required to end
   an utterance in quasi-streaming mode, default `3`.
 
