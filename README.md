@@ -1,91 +1,24 @@
 # quasistreaming-gigam
 
-Streaming WebSocket ASR using GigaAM `v3_e2e_rnnt` and TEN VAD.
-The connection stays open across utterances; `end_of_utt` marks an utterance
-boundary. The public protocol remains mono 16 kHz PCM16 input with JSON
-responses containing `text` and `end_of_utt`.
+WebSocket ASR на GigaAM `v3_e2e_rnnt` и TEN VAD. Принимает mono PCM16, 16 kHz; endpointing возвращает JSON с `text` и `end_of_utt`.
 
-The transport and endpointing are streaming, but this pinned GigaAM API only
-provides file-based `transcribe()`. Each partial therefore re-decodes a bounded
-short window in a worker thread rather than using a stateful decoder.
+## Compose
 
-The streaming ASR endpointing code and TEN VAD are ported from Alina_Service.
-On Linux, TEN VAD requires `libc++1`; the bundled Dockerfiles install it.
+CUDA-вариант уже описан в `docker-compose.yaml`:
 
-## Models
-
-GigaAM downloads `v3_e2e_rnnt` on first startup. Set
-`GIGAAM_DOWNLOAD_ROOT` to a persistent directory so container restarts reuse
-the checkpoint. The first load requires outbound network access and enough disk
-space for the model.
-
-TEN VAD is installed as a Python dependency and does not require a separate
-ONNX model file.
-
-## CPU
-
-```shell
-docker build -f Dockerfile.cpu -t quasistreaming-gigam:cpu .
-docker run --rm \
-  -p 8080:8080 \
-  -v gigaam-cache:/app/.cache/gigaam \
-  quasistreaming-gigam:cpu
-```
-
-## CUDA
-
-The CUDA image uses Python 3.11, PyTorch 2.6, and the CUDA 11.8 wheel stack.
-The host needs a compatible NVIDIA driver and the NVIDIA Container Toolkit.
-
-```shell
+```bash
 docker compose build
-docker compose up
+docker compose up -d
+docker compose logs -f
 ```
 
-Compose reserves GPU 0 and persists the GigaAM checkpoint in the
-`gigaam-v3-e2e-rnnt` volume. Startup logs must report
-`model=v3_e2e_rnnt device=cuda`. A CPU fallback means the host
-driver, GPU passthrough, PyTorch wheel, or GPU architecture needs attention.
+Нужны NVIDIA driver, NVIDIA Container Toolkit и GPU 0. CPU-вариант:
 
-To prewarm the model cache before rollout, start a container from the same image
-with the cache mounted and let model initialization finish once. Do not copy the
-old GigaAM ONNX model or token file into this cache; the Python GigaAM package
-downloads and verifies its own checkpoint.
-
-## Configuration
-
-- `GIGAAM_MODEL_NAME`: checkpoint name, default `v3_e2e_rnnt`.
-- `GIGAAM_DEVICE`: `auto`, `cpu`, or `cuda`; unavailable or incompatible CUDA
-  falls back to CPU, including one CPU retry after CUDA model-load failure.
-- `GIGAAM_DOWNLOAD_ROOT`: model cache, default `/app/.cache/gigaam`.
-- `GIGAAM_MAX_WINDOW_SECONDS`: maximum decode window, default `24`; values must
-  be finite, positive, and below GigaAM's 25-second short-form limit.
-- `VAD_THRESHOLD`, `VAD_MIN_SILENCE_DURATION`,
-  `VAD_MIN_SPEECH_DURATION`, `VAD_MAX_SPEECH_DURATION`: endpointing controls.
-- `INPUT_GAIN`: input multiplier.
-- `ASR_STREAMING_MODE=quasistreaming|streaming`: partial output mode; the
-  Docker Compose deployment uses `streaming` so final results only follow VAD
-  endpointing, while both modes use bounded re-decoding with this GigaAM API.
-- `ASR_QUASISTREAMING_STABLE_REPEATS`: matching partial results required to end
-  an utterance in quasi-streaming mode, default `3`.
-
-## Client
-
-The input WAV must be 16 kHz. Stereo audio is mixed to mono by the client.
-
-```shell
-python client.py input.wav ws://localhost:8080
+```bash
+docker build -f Dockerfile.cpu -t quasistreaming-gigam:cpu .
+docker run --rm -p 8080:8080 -v gigaam-cache:/app/.cache/gigaam quasistreaming-gigam:cpu
 ```
 
-## Tests
+## Конфигурация
 
-Tests mock the large model and CUDA hardware:
-
-```shell
-python -m pip install -r requirements.dev.txt
-python -m pytest
-```
-
-For deployment verification, also run the client against both images with a
-known speech fixture. On a GPU host, verify `torch.cuda.is_available()` inside
-the running container and confirm the startup log reports `device=cuda`.
+`PORT`, `GIGAAM_DEVICE=auto|cpu|cuda`, `GIGAAM_DOWNLOAD_ROOT`, `GIGAAM_MODEL_NAME`, `VAD_THRESHOLD`, `VAD_MIN_SILENCE_DURATION`, `INPUT_GAIN`, `ASR_STREAMING_MODE`. При первом старте нужен интернет и persistent volume модели. Проверка: `python client.py input.wav ws://localhost:8080`.
